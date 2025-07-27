@@ -23,70 +23,6 @@ var (
 	ErrProcessorFailed = errors.New("processor failed")
 )
 
-type Node struct {
-	endpoint string
-}
-
-type healthChecker struct {
-	processors PaymentProcessors
-	statuses   map[ProcessorId]HealthStatus
-	nodes      []Node
-	s          chan struct{}
-	wg         *sync.WaitGroup
-}
-
-func (h *healthChecker) Stop() {
-	h.s <- struct{}{}
-}
-
-func (h *healthChecker) GetStatus(id ProcessorId) HealthStatus {
-	hs, ok := h.statuses[id]
-	if !ok {
-		return HealthStatus{}
-	}
-	return hs
-}
-
-func (h *healthChecker) Store(hs HealthStatus) {
-	h.statuses[hs.ProcessorId] = hs
-}
-
-func (h *healthChecker) StoreAndPropagate(hs HealthStatus) {
-	h.Store(hs)
-	for _, node := range h.nodes {
-		if jsonBytes, err := json.Marshal(hs); err == nil {
-			_, _ = http.Post(node.endpoint+"/_internal/service-health",
-				"application/json", bytes.NewReader(jsonBytes))
-		}
-	}
-}
-
-func (h *healthChecker) Run() {
-	log.Println("Starting health checker")
-	h.wg.Add(1)
-	defer h.wg.Done()
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-h.s:
-			log.Println("Stopping health checker")
-			return
-		case <-ticker.C:
-			for _, processor := range h.processors {
-				hs, err := processor.HealthStatus()
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-				h.StoreAndPropagate(hs)
-			}
-		}
-	}
-}
-
 type paymentProcessor struct {
 	id       ProcessorId
 	endpoint string
@@ -113,7 +49,6 @@ func (p *paymentProcessor) Process(r PaymentRequest) (ProcessedPayment, error) {
 
 	resp, err := http.Post(p.endpoint+"/payments", "application/json", bytes.NewReader(b))
 	if err != nil {
-		log.Println("Error processing request:", err)
 		return pp, ErrProcessorFailed
 	}
 	defer func(Body io.ReadCloser) {
@@ -128,8 +63,6 @@ func (p *paymentProcessor) Process(r PaymentRequest) (ProcessedPayment, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Println("Error processing request:", resp.StatusCode, string(body))
 		return pp, ErrProcessorFailed
 	}
 
@@ -143,7 +76,6 @@ type HealthStatus struct {
 }
 
 func (p *paymentProcessor) HealthStatus() (HealthStatus, error) {
-	log.Println("Checking health status of:", p.id)
 	var hs HealthStatus
 	resp, err := http.Get(p.endpoint + "/payments/service-health")
 	if err != nil {
@@ -167,6 +99,11 @@ func (p *paymentProcessor) HealthStatus() (HealthStatus, error) {
 type ProcessorId int
 type ProcessorName string
 
+const (
+	Default ProcessorId = iota
+	Fallback
+)
+
 func (p ProcessorId) Name() ProcessorName {
 	switch p {
 	case Default:
@@ -177,11 +114,6 @@ func (p ProcessorId) Name() ProcessorName {
 		return ""
 	}
 }
-
-const (
-	Default ProcessorId = iota
-	Fallback
-)
 
 type PaymentProcessors map[ProcessorId]*paymentProcessor
 
@@ -207,6 +139,7 @@ type Summary map[ProcessorName]PaymentSummary
 type storage interface {
 	Save(ProcessedPayment) error
 	GetSummary(from, to time.Time) (Summary, error)
+	CleanUp() error
 }
 
 type pgStorage struct {
@@ -228,6 +161,7 @@ const (
 		SELECT processor_id, COUNT(*), SUM(amount)
 		FROM payments WHERE created_at BETWEEN $1 AND $2
 		GROUP BY processor_id`
+	deleteAllSql = `DELETE FROM payments WHERE processor_id in (0,1)`
 )
 
 func (s *pgStorage) Save(p ProcessedPayment) error {
@@ -275,6 +209,20 @@ func (s *pgStorage) GetSummary(from, to time.Time) (Summary, error) {
 	return summary, nil
 }
 
+func (s *pgStorage) CleanUp() error {
+	ctx := context.Background()
+	conn, err := s.db.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	_, err = conn.Conn().Exec(ctx, deleteAllSql)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *pgStorage) Init() error {
 	ctx := context.Background()
 	conn, err := s.db.Acquire(ctx)
@@ -295,7 +243,7 @@ type queue struct {
 
 func newQueue() *queue {
 	return &queue{
-		channel: make(chan PaymentRequest, 10000),
+		channel: make(chan PaymentRequest, 100_000),
 	}
 }
 
@@ -316,14 +264,12 @@ type workerConfig struct {
 	queue     *queue
 	processor PaymentProcessors
 	store     storage
-	hc        *healthChecker
 }
 
 type worker struct {
 	queue     *queue
 	processor PaymentProcessors
 	store     storage
-	hc        *healthChecker
 	wg        *sync.WaitGroup
 	s         chan struct{}
 }
@@ -333,7 +279,6 @@ func newWorker(c workerConfig, wg *sync.WaitGroup) *worker {
 		queue:     c.queue,
 		processor: c.processor,
 		store:     c.store,
-		hc:        c.hc,
 		wg:        wg,
 		s:         make(chan struct{}, 1),
 	}
@@ -358,31 +303,29 @@ func (w *worker) Run() {
 	w.wg.Add(1)
 	defer w.wg.Done()
 	for {
-		if r, err := w.queue.poll(1 * time.Second); err == nil {
+		if r, err := w.queue.poll(100 * time.Millisecond); err == nil {
 			var processor = w.processor[Default]
-			defaultStatus := w.hc.GetStatus(Default)
-			fallbackStatus := w.hc.GetStatus(Fallback)
 
-			if defaultStatus.Failing || defaultStatus.MinResponseTime > fallbackStatus.MinResponseTime {
-				processor = w.processor[Fallback]
+			for i := 0; i < 10; i++ {
+				p, err := processor.Process(r)
+				if err == nil {
+					err = w.store.Save(p)
+					if err != nil {
+						log.Println("failed to save payment:", err)
+					}
+					break
+				}
+				if err != nil {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
 			}
 
-			p, err := processor.Process(r)
-			if err != nil && errors.Is(err, ErrProcessorFailed) {
-				w.hc.StoreAndPropagate(HealthStatus{
-					Failing:     true,
-					ProcessorId: p.Processor,
-				})
-			}
 			if err != nil {
-				log.Println("Error processing payment:", err)
 				w.queue.add(r)
 				continue
 			}
-			err = w.store.Save(p)
-			if err != nil {
-				log.Println("failed to save payment:", err)
-			}
+
 		} else {
 			if w.shouldStop() {
 				return
@@ -458,14 +401,6 @@ func main() {
 		},
 	}
 
-	nodeEndpoints := strings.Split(os.Getenv("NODE_LIST"), ",")
-	nodes := make([]Node, len(nodeEndpoints))
-	for i, endpoint := range nodeEndpoints {
-		nodes[i] = Node{
-			endpoint: endpoint,
-		}
-	}
-
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -476,33 +411,22 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	hc := &healthChecker{
-		processors: processors,
-		nodes:      nodes,
-		statuses: map[ProcessorId]HealthStatus{
-			Default:  {},
-			Fallback: {MinResponseTime: 100},
-		},
-		wg: &wg,
-		s:  make(chan struct{}, 1),
-	}
 
 	if os.Getenv("MASTER_NODE") == "true" {
 		err = store.Init()
 		if err != nil {
 			log.Fatal(err)
 		}
-		go hc.Run()
 	}
 
 	workerConf := workerConfig{
 		queue:     requestQueue,
 		processor: processors,
 		store:     store,
-		hc:        hc,
 	}
 
 	workers := []*worker{
+		newWorker(workerConf, &wg),
 		newWorker(workerConf, &wg),
 		newWorker(workerConf, &wg),
 		newWorker(workerConf, &wg),
@@ -517,34 +441,25 @@ func main() {
 	router.Handle("/payments", &paymentHandler{queue: requestQueue})
 	router.Handle("/payments-summary", &summaryHandler{store: store})
 	router.HandleFunc("/purge-payments", func(w http.ResponseWriter, r *http.Request) {
-	})
-	router.HandleFunc("/_internal/service-health", func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, err := io.ReadAll(r.Body)
+		err := store.CleanUp()
 		if err != nil {
+			log.Println("failed to purge payments: ", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var hs HealthStatus
-		err = json.Unmarshal(bodyBytes, &hs)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		log.Println(hs)
-		hc.Store(hs)
 	})
 
 	go func() {
 		var captureSignal = make(chan os.Signal, 1)
 		signal.Notify(captureSignal, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT)
-		signalHandler(<-captureSignal, workers, hc, &wg)
+		signalHandler(<-captureSignal, workers, &wg)
 	}()
 
 	log.Println("Starting server")
 	log.Println(http.ListenAndServe(":8080", router))
 }
 
-func signalHandler(signal os.Signal, workers []*worker, hc *healthChecker, wg *sync.WaitGroup) {
+func signalHandler(signal os.Signal, workers []*worker, wg *sync.WaitGroup) {
 	log.Printf("Caught signal: %+v\n", signal)
 	log.Println("Shutting down workers...")
 
@@ -552,7 +467,6 @@ func signalHandler(signal os.Signal, workers []*worker, hc *healthChecker, wg *s
 		w.DrainAndStop()
 	}
 
-	hc.Stop()
 	wg.Wait()
 
 	log.Println("Finished server cleanup, exiting...")

@@ -23,7 +23,6 @@ services:
     hostname: api1
     environment:
       - MASTER_NODE=true
-      - NODE_LIST=http://api2:8080
       - DATABASE_URL=postgres://r2025:passwd@db:5432/r2025?sslmode=disable
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
@@ -37,14 +36,13 @@ services:
       resources:
         limits:
           cpus: "0.55"
-          memory: "50MB"
+          memory: "128MB"
 
   api2:
     <<: *api
     hostname: api2
     environment:
       - MASTER_NODE=false
-      - NODE_LIST=http://api1:8080
       - DATABASE_URL=postgres://r2025:passwd@db:5432/r2025?sslmode=disable
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
@@ -60,7 +58,7 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: "235MB"
+          memory: "79MB"
     ports:
       - "5432:5432"
     healthcheck:
