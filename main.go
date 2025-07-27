@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/julienschmidt/httprouter"
 	"io"
 	"log"
 	"net/http"
@@ -25,7 +26,7 @@ func NewPaymentHandler(tq chan *Task, taskPool *sync.Pool) *PaymentHandler {
 	}
 }
 
-func (h *PaymentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *PaymentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	task := h.taskPool.Get().(*Task)
 	_, err := r.Body.Read(task.bytes)
 	if err != nil && err != io.EOF {
@@ -41,7 +42,7 @@ type summaryHandler struct {
 	store storage
 }
 
-func (h *summaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *summaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	fromStr := r.URL.Query().Get("from")
 	toStr := r.URL.Query().Get("to")
 	from, err := time.Parse(time.RFC3339, fromStr)
@@ -119,10 +120,10 @@ func main() {
 		go NewWorker(workerConf, &wg).Run()
 	}
 
-	router := http.NewServeMux()
-	router.Handle("/payments", NewPaymentHandler(taskQueue, &taskPool))
-	router.Handle("/payments-summary", &summaryHandler{store: store})
-	router.HandleFunc("/purge-payments", func(w http.ResponseWriter, r *http.Request) {
+	router := httprouter.New()
+	router.POST("/payments", NewPaymentHandler(taskQueue, &taskPool).ServeHTTP)
+	router.GET("/payments-summary", (&summaryHandler{store: store}).ServeHTTP)
+	router.POST("/purge-payments", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		err := store.CleanUp()
 		if err != nil {
 			log.Println("failed to purge payments: ", err)
