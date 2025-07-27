@@ -42,16 +42,23 @@ type summaryHandler struct {
 	store storage
 }
 
+func parseTimeOrDefault(s string, t time.Time) (time.Time, error) {
+	if s == "" {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
+}
+
 func (h *summaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	fromStr := r.URL.Query().Get("from")
 	toStr := r.URL.Query().Get("to")
-	from, err := time.Parse(time.RFC3339, fromStr)
+	from, err := parseTimeOrDefault(fromStr, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to parse time %s: %s", fromStr, err), http.StatusBadRequest)
 		return
 	}
 
-	to, err := time.Parse(time.RFC3339, toStr)
+	to, err := parseTimeOrDefault(toStr, time.Now().UTC().Add(24*time.Hour))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to parse time %s: %s", toStr, err), http.StatusBadRequest)
 		return
