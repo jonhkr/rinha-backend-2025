@@ -50,7 +50,7 @@ services:
   db:
     image: postgres
     restart: always
-    shm_size: 256mb
+    shm_size: 128mb
     hostname: db
     networks:
       - backend
@@ -59,13 +59,15 @@ services:
         limits:
           cpus: "0.25"
           memory: "79MB"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U r2025 -d r2025" ]
-      interval: 10s
-      retries: 5
-      start_period: 30s
+      interval: 1s
+      retries: 10
+      start_period: 2s
       timeout: 10s
     environment:
       POSTGRES_USER: r2025
