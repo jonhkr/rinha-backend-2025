@@ -1,13 +1,10 @@
 package main
 
 import (
-	jsoniter "github.com/json-iterator/go"
 	"log"
 	"sync"
 	"time"
 )
-
-var json = jsoniter.ConfigFastest
 
 type WorkerConfig struct {
 	TaskQueue  chan *Task

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/julienschmidt/httprouter"
 	"io"
 	"log"
@@ -14,33 +15,7 @@ import (
 	"time"
 )
 
-type PaymentHandler struct {
-	taskQueue chan *Task
-	taskPool  *sync.Pool
-}
-
-func NewPaymentHandler(tq chan *Task, taskPool *sync.Pool) *PaymentHandler {
-	return &PaymentHandler{
-		taskQueue: tq,
-		taskPool:  taskPool,
-	}
-}
-
-func (h *PaymentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	task := h.taskPool.Get().(*Task)
-	_, err := r.Body.Read(task.bytes)
-	if err != nil && err != io.EOF {
-		http.Error(w, fmt.Sprintf("failed to read body: %s", err), http.StatusBadRequest)
-		return
-	}
-
-	h.taskQueue <- task
-	return
-}
-
-type summaryHandler struct {
-	store storage
-}
+var json = jsoniter.ConfigFastest
 
 func parseTimeOrDefault(s string, t time.Time) (time.Time, error) {
 	if s == "" {
@@ -49,48 +24,20 @@ func parseTimeOrDefault(s string, t time.Time) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
-func (h *summaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	fromStr := r.URL.Query().Get("from")
-	toStr := r.URL.Query().Get("to")
-	from, err := parseTimeOrDefault(fromStr, time.Now().UTC().Add(-24*time.Hour))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to parse time %s: %s", fromStr, err), http.StatusBadRequest)
-		return
-	}
-
-	to, err := parseTimeOrDefault(toStr, time.Now().UTC().Add(24*time.Hour))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to parse time %s: %s", toStr, err), http.StatusBadRequest)
-		return
-	}
-
-	s, err := h.store.GetSummary(from, to)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(s)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-}
-
 func main() {
 	nWorkers, err := strconv.ParseInt(os.Getenv("WORKERS"), 10, 64)
 	if err != nil {
 		nWorkers = 5
 	}
 
-	taskPool := sync.Pool{
+	taskPool := &sync.Pool{
 		New: func() interface{} {
 			buff := make([]byte, 256)
 			return &Task{buff}
 		},
 	}
 
-	PreAllocate[Task](&taskPool, 10_000)
+	PreAllocate[Task](taskPool, 10_000)
 
 	taskQueue := make(chan *Task, 10_000)
 
@@ -118,7 +65,7 @@ func main() {
 
 	workerConf := WorkerConfig{
 		TaskQueue:  taskQueue,
-		TaskPool:   &taskPool,
+		TaskPool:   taskPool,
 		Store:      store,
 		Processors: processors,
 	}
@@ -128,8 +75,44 @@ func main() {
 	}
 
 	router := httprouter.New()
-	router.POST("/payments", NewPaymentHandler(taskQueue, &taskPool).ServeHTTP)
-	router.GET("/payments-summary", (&summaryHandler{store: store}).ServeHTTP)
+	router.POST("/payments", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		task := taskPool.Get().(*Task)
+		_, err := r.Body.Read(task.bytes)
+		if err != nil && err != io.EOF {
+			http.Error(w, fmt.Sprintf("failed to read body: %s", err), http.StatusBadRequest)
+			return
+		}
+
+		taskQueue <- task
+	})
+	router.GET("/payments-summary", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		fromStr := r.URL.Query().Get("from")
+		toStr := r.URL.Query().Get("to")
+		from, err := parseTimeOrDefault(fromStr, time.Now().UTC().Add(-24*time.Hour))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to parse time %s: %s", fromStr, err), http.StatusBadRequest)
+			return
+		}
+
+		to, err := parseTimeOrDefault(toStr, time.Now().UTC().Add(24*time.Hour))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to parse time %s: %s", toStr, err), http.StatusBadRequest)
+			return
+		}
+
+		s, err := store.GetSummary(from, to)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		err = json.NewEncoder(w).Encode(s)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
 	router.POST("/purge-payments", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		err := store.CleanUp()
 		if err != nil {

@@ -7,12 +7,29 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	CorrelationIdAlreadyExists = "CorrelationId already exists"
 )
 
 type paymentProcessor struct {
 	id       ProcessorId
 	endpoint string
+}
+
+type paymentRequest struct {
+	CorrelationId string  `json:"correlationId"`
+	Amount        float64 `json:"amount"`
+	RequestedAt   string  `json:"requestedAt"`
+}
+
+var requestPool = sync.Pool{
+	New: func() interface{} {
+		return new(paymentRequest)
+	},
 }
 
 func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) {
@@ -24,15 +41,16 @@ func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) 
 	pp.CreatedAt = requestedAt
 	pp.Processor = p.id
 
-	req := map[string]interface{}{
-		"correlationId": r.CorrelationId,
-		"amount":        r.Amount,
-		"requestedAt":   requestedAt.Format(time.RFC3339Nano),
-	}
+	req := requestPool.Get().(*paymentRequest)
+	req.CorrelationId = r.CorrelationId
+	req.Amount = r.Amount
+	req.RequestedAt = requestedAt.Format(time.RFC3339Nano)
+
 	b, err := json.Marshal(req)
 	if err != nil {
 		return pp, err
 	}
+	requestPool.Put(req)
 
 	resp, err := http.Post(p.endpoint+"/payments", "application/json", bytes.NewReader(b))
 	if err != nil {
@@ -44,7 +62,7 @@ func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) 
 
 	if resp.StatusCode == http.StatusUnprocessableEntity {
 		body, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(body), "CorrelationId already exists") {
+		if strings.Contains(string(body), CorrelationIdAlreadyExists) {
 			return pp, nil
 		}
 	}
