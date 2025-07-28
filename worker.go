@@ -36,7 +36,21 @@ func NewWorker(config WorkerConfig, wg *sync.WaitGroup) *Worker {
 	}
 }
 
-const maxTries = 10
+const maxTries = 5
+
+func (w *Worker) Process(r *PaymentRequest) (ProcessedPayment, error) {
+	defaultProcessor := w.config.Processors[Default]
+	for i := 0; i < maxTries; i++ {
+		pp, err := defaultProcessor.Process(r)
+		if err == nil {
+			return pp, nil
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return w.config.Processors[Fallback].Process(r)
+}
 
 func (w *Worker) Run() {
 	log.Println("Starting worker")
@@ -44,8 +58,6 @@ func (w *Worker) Run() {
 	defer w.wg.Done()
 
 	for task := range w.config.TaskQueue {
-		var processor = w.config.Processors[Default]
-
 		var request = w.requestPool.Get().(*PaymentRequest)
 		err := json.Unmarshal(task.bytes, request)
 		if err != nil {
@@ -53,29 +65,18 @@ func (w *Worker) Run() {
 			continue
 		}
 
-		i := 0
-		for {
-			if i >= maxTries {
-				w.config.TaskQueue <- task
-				break
-			}
-			pp, err := processor.Process(request)
-			if err != nil {
-				i++
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
+		pp, err := w.Process(request)
+		if err == nil {
 			if err = w.config.Store.Save(pp); err != nil {
-				i++
 				log.Println("failed to save request:", err)
-				continue
+				w.config.TaskQueue <- task
+			} else {
+				w.config.TaskPool.Put(task)
 			}
-
-			break
+		} else {
+			w.config.TaskQueue <- task
 		}
 
 		w.requestPool.Put(request)
-		w.config.TaskPool.Put(task)
 	}
 }

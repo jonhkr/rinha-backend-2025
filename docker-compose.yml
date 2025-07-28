@@ -14,7 +14,7 @@ x-api: &api
   deploy:
     resources:
       limits:
-        cpus: "0.25"
+        cpus: "0.40"
         memory: "54MB"
 services:
   api1:
@@ -23,12 +23,6 @@ services:
   api2:
     <<: *api
     hostname: api2
-  api3:
-    <<: *api
-    hostname: api3
-  api4:
-    <<: *api
-    hostname: api4
 
   nginx:
     image: nginx:1.25-alpine
@@ -38,8 +32,6 @@ services:
     depends_on:
       - api1
       - api2
-      - api3
-      - api4
     ports:
       - "9999:80"
     networks:
@@ -61,7 +53,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.25"
+          cpus: "0.45"
           memory: "79MB"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
