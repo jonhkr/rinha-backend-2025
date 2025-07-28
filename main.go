@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	jsoniter "github.com/json-iterator/go"
-	"github.com/julienschmidt/httprouter"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -24,20 +22,20 @@ func parseTimeOrDefault(s string, t time.Time) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
+var taskPool = sync.Pool{
+	New: func() interface{} {
+		buff := make([]byte, 256)
+		return &Task{buff}
+	},
+}
+
 func main() {
 	nWorkers, err := strconv.ParseInt(os.Getenv("WORKERS"), 10, 64)
 	if err != nil {
 		nWorkers = 5
 	}
 
-	taskPool := &sync.Pool{
-		New: func() interface{} {
-			buff := make([]byte, 256)
-			return &Task{buff}
-		},
-	}
-
-	PreAllocate[Task](taskPool, 10_000)
+	PreAllocate[Task](&taskPool, 10_000)
 
 	taskQueue := make(chan *Task, 10_000)
 
@@ -65,7 +63,7 @@ func main() {
 
 	workerConf := WorkerConfig{
 		TaskQueue:  taskQueue,
-		TaskPool:   taskPool,
+		TaskPool:   &taskPool,
 		Store:      store,
 		Processors: processors,
 	}
@@ -74,54 +72,57 @@ func main() {
 		go NewWorker(workerConf, &wg).Run()
 	}
 
-	router := httprouter.New()
-	router.POST("/payments", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		task := taskPool.Get().(*Task)
-		_, err := r.Body.Read(task.bytes)
-		if err != nil && err != io.EOF {
-			http.Error(w, fmt.Sprintf("failed to read body: %s", err), http.StatusBadRequest)
-			return
-		}
-
-		taskQueue <- task
+	f := fiber.New(fiber.Config{
+		DisableStartupMessage: true,
 	})
-	router.GET("/payments-summary", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		fromStr := r.URL.Query().Get("from")
-		toStr := r.URL.Query().Get("to")
+
+	f.Post("/payments", func(c *fiber.Ctx) error {
+		task := taskPool.Get().(*Task)
+		copy(task.bytes, c.BodyRaw())
+		taskQueue <- task
+		return c.SendStatus(fiber.StatusOK)
+	})
+
+	f.Get("/payments-summary", func(c *fiber.Ctx) error {
+		fromStr := c.Query("from", "")
+		toStr := c.Query("to", "")
 		from, err := parseTimeOrDefault(fromStr, time.Now().UTC().Add(-24*time.Hour))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse time %s: %s", fromStr, err), http.StatusBadRequest)
-			return
+			_, err := c.Writef("failed to parse time %s: %s", fromStr, err)
+			if err != nil {
+				return err
+			}
+			return c.SendStatus(fiber.StatusBadRequest)
 		}
 
 		to, err := parseTimeOrDefault(toStr, time.Now().UTC().Add(24*time.Hour))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse time %s: %s", toStr, err), http.StatusBadRequest)
-			return
+			_, err := c.Writef("failed to parse time %s: %s", fromStr, err)
+			if err != nil {
+				return err
+			}
+			return c.SendStatus(fiber.StatusBadRequest)
 		}
 
 		s, err := store.GetSummary(from, to)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			_, err := c.Writef("failed to get summary: %s", err)
+			if err != nil {
+				return err
+			}
+			return c.SendStatus(fiber.StatusInternalServerError)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		err = json.NewEncoder(w).Encode(s)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		return c.JSON(s)
 	})
 
-	router.POST("/purge-payments", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	f.Post("/purge-payments", func(c *fiber.Ctx) error {
 		err := store.CleanUp()
 		if err != nil {
-			log.Println("failed to purge payments: ", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return errors.Join(errors.New("failed to clean up database"), err)
 		}
+		return c.SendStatus(fiber.StatusOK)
 	})
 
 	log.Println("Starting server")
-	log.Fatal(http.ListenAndServe(":8080", router))
+	log.Fatal(f.Listen(":8080"))
 }
