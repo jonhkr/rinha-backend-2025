@@ -1,6 +1,9 @@
-package main
+package internal
 
-import "time"
+import (
+	"github.com/google/btree"
+	"time"
+)
 
 const (
 	Default ProcessorId = iota
@@ -8,7 +11,7 @@ const (
 )
 
 type Task struct {
-	bytes []byte
+	Bytes []byte
 }
 
 type ProcessorId int
@@ -25,7 +28,7 @@ func (p ProcessorId) Name() ProcessorName {
 	}
 }
 
-type PaymentProcessors map[ProcessorId]*paymentProcessor
+type PaymentProcessors map[ProcessorId]*PaymentProcessor
 
 type HealthStatus struct {
 	Failing         bool        `json:"failing"`
@@ -45,9 +48,25 @@ type ProcessedPayment struct {
 	CreatedAt     time.Time
 }
 
+func (pp ProcessedPayment) Less(item btree.Item) bool {
+	a := pp
+	b := item.(ProcessedPayment)
+	if a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CorrelationId < b.CorrelationId
+	}
+	return a.CreatedAt.Before(b.CreatedAt)
+}
+
 type PaymentSummary struct {
 	TotalRequests int64   `json:"totalRequests"`
 	TotalAmount   float64 `json:"totalAmount"`
 }
 
 type Summary map[ProcessorName]PaymentSummary
+
+func ParseTimeOrDefault(s string, t time.Time) (time.Time, error) {
+	if s == "" {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
+}

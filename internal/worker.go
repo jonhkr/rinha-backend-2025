@@ -1,16 +1,19 @@
-package main
+package internal
 
 import (
+	jsoniter "github.com/json-iterator/go"
 	"log"
 	"sync"
 	"time"
 )
 
+var json = jsoniter.ConfigFastest
+
 type WorkerConfig struct {
 	TaskQueue  chan *Task
 	TaskPool   *sync.Pool
 	Processors PaymentProcessors
-	Store      storage
+	Store      Storage
 }
 
 type Worker struct {
@@ -56,7 +59,7 @@ func (w *Worker) Run() {
 
 	for task := range w.config.TaskQueue {
 		var request = w.requestPool.Get().(*PaymentRequest)
-		err := json.Unmarshal(task.bytes, request)
+		err := json.Unmarshal(task.Bytes, request)
 		if err != nil {
 			log.Println("failed to decode request:", err)
 			continue

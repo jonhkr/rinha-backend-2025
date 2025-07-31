@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"bytes"
@@ -15,9 +15,9 @@ const (
 	CorrelationIdAlreadyExists = "CorrelationId already exists"
 )
 
-type paymentProcessor struct {
-	id       ProcessorId
-	endpoint string
+type PaymentProcessor struct {
+	Id       ProcessorId
+	Endpoint string
 }
 
 type paymentRequest struct {
@@ -32,14 +32,14 @@ var requestPool = sync.Pool{
 	},
 }
 
-func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) {
+func (p *PaymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) {
 	requestedAt := time.Now().UTC()
 
 	var pp ProcessedPayment
 	pp.CorrelationId = r.CorrelationId
 	pp.Amount = r.Amount
 	pp.CreatedAt = requestedAt
-	pp.Processor = p.id
+	pp.Processor = p.Id
 
 	req := requestPool.Get().(*paymentRequest)
 	req.CorrelationId = r.CorrelationId
@@ -52,7 +52,7 @@ func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) 
 	}
 	requestPool.Put(req)
 
-	resp, err := http.Post(p.endpoint+"/payments", "application/json", bytes.NewReader(b))
+	resp, err := http.Post(p.Endpoint+"/payments", "application/json", bytes.NewReader(b))
 	if err != nil {
 		return pp, ErrProcessorFailed
 	}
@@ -74,23 +74,23 @@ func (p *paymentProcessor) Process(r *PaymentRequest) (ProcessedPayment, error) 
 	return pp, nil
 }
 
-func (p *paymentProcessor) HealthStatus() (HealthStatus, error) {
+func (p *PaymentProcessor) HealthStatus() (HealthStatus, error) {
 	var hs HealthStatus
-	resp, err := http.Get(p.endpoint + "/payments/service-health")
+	resp, err := http.Get(p.Endpoint + "/payments/service-health")
 	if err != nil {
-		return hs, errors.New(fmt.Sprintf("error fetching service health: %s, id: %d", err, p.id))
+		return hs, errors.New(fmt.Sprintf("error fetching service health: %s, Id: %d", err, p.Id))
 	}
 	defer func(Body io.ReadCloser) {
 		_ = Body.Close()
 	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return hs, errors.New(fmt.Sprintf("received non 200 response from service id: %d", p.id))
+		return hs, errors.New(fmt.Sprintf("received non 200 response from service Id: %d", p.Id))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&hs); err != nil {
 		return hs, errors.New(fmt.Sprintf("error decoding service health response: %s", err))
 	}
-	hs.ProcessorId = p.id
+	hs.ProcessorId = p.Id
 	return hs, nil
 }

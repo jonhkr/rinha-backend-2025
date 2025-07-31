@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-type pgStorage struct {
-	db *pgxpool.Pool
+type PgStorage struct {
+	DB *pgxpool.Pool
 }
 
 const (
@@ -20,9 +20,9 @@ const (
 	deleteAllSql = `DELETE FROM payments WHERE processor_id in (0,1)`
 )
 
-func (s *pgStorage) Save(p ProcessedPayment) error {
+func (s *PgStorage) Save(p ProcessedPayment) error {
 	ctx := context.Background()
-	conn, err := s.db.Acquire(ctx)
+	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -35,9 +35,9 @@ func (s *pgStorage) Save(p ProcessedPayment) error {
 	return nil
 }
 
-func (s *pgStorage) GetSummary(from, to time.Time) (Summary, error) {
+func (s *PgStorage) GetSummary(from, to time.Time) (Summary, error) {
 	ctx := context.Background()
-	conn, err := s.db.Acquire(ctx)
+	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -65,9 +65,9 @@ func (s *pgStorage) GetSummary(from, to time.Time) (Summary, error) {
 	return summary, nil
 }
 
-func (s *pgStorage) CleanUp() error {
+func (s *PgStorage) CleanUp() error {
 	ctx := context.Background()
-	conn, err := s.db.Acquire(ctx)
+	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
 		return err
 	}

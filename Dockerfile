@@ -7,12 +7,12 @@ RUN go mod download
 
 COPY . ./
 
-RUN go build -o /main
+RUN go build -o /api ./cmd/api
+RUN go build -o /db ./cmd/db
 
 # Final image
 FROM alpine:latest
-COPY --from=builder /main /main
+COPY --from=builder /api /api
+COPY --from=builder /db /db
 
 EXPOSE 8080
-
-CMD ["/main"]

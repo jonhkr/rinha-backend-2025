@@ -6,6 +6,7 @@ toolchain go1.24.0
 
 require (
 	github.com/gofiber/fiber/v2 v2.52.9
+	github.com/google/btree v1.1.3
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/json-iterator/go v1.1.12
 )
